@@ -17,7 +17,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
@@ -39,6 +38,13 @@ private const val SUPABASE_KEY =
 
 private val httpClient = OkHttpClient()
 private val executor = Executors.newSingleThreadExecutor()
+
+data class ChildDevice(
+    val id: String,
+    val name: String,
+    val status: String,
+    val lastSeen: String
+)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -76,15 +82,30 @@ fun ParentAuthScreen() {
     var familyMessage by remember { mutableStateOf("") }
     var creatingFamily by remember { mutableStateOf(false) }
 
-    // Pairing code states
+    // Child device states
+    var childDevices by remember {
+        mutableStateOf<List<ChildDevice>>(emptyList())
+    }
+
+    var childDevicesLoading by remember {
+        mutableStateOf(false)
+    }
+
+    var childDevicesMessage by remember {
+        mutableStateOf("")
+    }
+
+    // Pairing states
     var pairingDeviceName by remember {
         mutableStateOf("Parent Device")
     }
+
     var pairingCode by remember { mutableStateOf("") }
     var pairingExpiryEpoch by remember { mutableLongStateOf(0L) }
     var pairingRemainingSeconds by remember {
         mutableLongStateOf(0L)
     }
+
     var pairingLoading by remember { mutableStateOf(false) }
     var pairingMessage by remember { mutableStateOf("") }
 
@@ -98,7 +119,8 @@ fun ParentAuthScreen() {
             val remaining =
                 pairingExpiryEpoch - Instant.now().epochSecond
 
-            pairingRemainingSeconds = remaining.coerceAtLeast(0L)
+            pairingRemainingSeconds =
+                remaining.coerceAtLeast(0L)
 
             if (remaining <= 0L) break
 
@@ -106,7 +128,116 @@ fun ParentAuthScreen() {
         }
     }
 
+    // Load child devices belonging to this family
+    fun loadChildDevices(token: String, selectedFamilyId: String) {
+
+        if (token.isBlank() || selectedFamilyId.isBlank()) return
+
+        childDevicesLoading = true
+        childDevicesMessage = ""
+
+        executor.execute {
+            try {
+                val url =
+                    "$SUPABASE_URL/rest/v1/devices" +
+                    "?select=id,device_name,device_status,last_seen" +
+                    "&family_id=eq.$selectedFamilyId" +
+                    "&device_type=eq.child" +
+                    "&order=created_at.desc"
+
+                val request = Request.Builder()
+                    .url(url)
+                    .addHeader("apikey", SUPABASE_KEY)
+                    .addHeader("Authorization", "Bearer $token")
+                    .get()
+                    .build()
+
+                httpClient.newCall(request).execute().use { response ->
+
+                    val responseText =
+                        response.body?.string().orEmpty()
+
+                    mainHandler.post {
+                        childDevicesLoading = false
+
+                        if (response.isSuccessful) {
+                            try {
+                                val array = JSONArray(responseText)
+                                val list = mutableListOf<ChildDevice>()
+
+                                for (i in 0 until array.length()) {
+                                    val item = array.getJSONObject(i)
+
+                                    val lastSeenRaw =
+                                        item.optString("last_seen")
+                                            .takeIf {
+                                                it.isNotBlank() &&
+                                                it != "null"
+                                            }.orEmpty()
+
+                                    val formattedLastSeen =
+                                        if (lastSeenRaw.isNotBlank()) {
+                                            try {
+                                                OffsetDateTime.parse(
+                                                    lastSeenRaw
+                                                ).toLocalDateTime()
+                                                    .toString()
+                                                    .replace("T", " ")
+                                                    .take(19)
+                                            } catch (_: Exception) {
+                                                lastSeenRaw
+                                            }
+                                        } else {
+                                            "Not reported yet"
+                                        }
+
+                                    list.add(
+                                        ChildDevice(
+                                            id = item.optString("id"),
+                                            name = item.optString("device_name"),
+                                            status = item.optString(
+                                                "device_status",
+                                                "offline"
+                                            ),
+                                            lastSeen = formattedLastSeen
+                                        )
+                                    )
+                                }
+
+                                childDevices = list
+
+                                childDevicesMessage =
+                                    if (list.isEmpty()) {
+                                        "Abhi koi Child Device connected nahi hai."
+                                    } else {
+                                        ""
+                                    }
+
+                            } catch (e: Exception) {
+                                childDevicesMessage =
+                                    "Device data read error: ${e.message}"
+                            }
+
+                        } else {
+                            childDevicesMessage =
+                                "Device load error: $responseText"
+                        }
+                    }
+                }
+
+            } catch (e: Exception) {
+                mainHandler.post {
+                    childDevicesLoading = false
+                    childDevicesMessage =
+                        "Connection error: ${e.message}"
+                }
+            }
+        }
+    }
+
+    // Load family
     fun loadFamily(token: String, parentId: String) {
+
         familyLoading = true
         familyMessage = ""
 
@@ -115,7 +246,7 @@ fun ParentAuthScreen() {
                 val request = Request.Builder()
                     .url(
                         "$SUPABASE_URL/rest/v1/families" +
-                            "?select=id,name&owner_id=eq.$parentId"
+                        "?select=id,name&owner_id=eq.$parentId"
                     )
                     .addHeader("apikey", SUPABASE_KEY)
                     .addHeader("Authorization", "Bearer $token")
@@ -123,7 +254,9 @@ fun ParentAuthScreen() {
                     .build()
 
                 httpClient.newCall(request).execute().use { response ->
-                    val responseText = response.body?.string().orEmpty()
+
+                    val responseText =
+                        response.body?.string().orEmpty()
 
                     mainHandler.post {
                         familyLoading = false
@@ -133,33 +266,53 @@ fun ParentAuthScreen() {
                                 val families = JSONArray(responseText)
 
                                 if (families.length() > 0) {
-                                    val family = families.getJSONObject(0)
-                                    familyId = family.optString("id")
-                                    familyName = family.optString("name")
+                                    val family =
+                                        families.getJSONObject(0)
+
+                                    val loadedFamilyId =
+                                        family.optString("id")
+
+                                    familyId = loadedFamilyId
+                                    familyName =
+                                        family.optString("name")
+
+                                    // Automatically load child devices
+                                    loadChildDevices(
+                                        token,
+                                        loadedFamilyId
+                                    )
+
                                 } else {
                                     familyId = ""
                                     familyName = ""
+                                    childDevices = emptyList()
+                                    childDevicesMessage =
+                                        "Pehle Family create karo."
                                 }
+
                             } catch (_: Exception) {
                                 familyMessage =
                                     "Family data read nahi ho paya."
                             }
+
                         } else {
                             familyMessage =
                                 "Family load error: $responseText"
                         }
                     }
                 }
+
             } catch (e: Exception) {
                 mainHandler.post {
                     familyLoading = false
                     familyMessage =
-                        "Connection error: ${e.message ?: "Unknown error"}"
+                        "Connection error: ${e.message}"
                 }
             }
         }
     }
 
+    // Login / Signup
     fun authenticate(signup: Boolean) {
 
         if (email.isBlank() || password.length < 8) {
@@ -229,14 +382,16 @@ fun ParentAuthScreen() {
                                 loggedIn = true
 
                                 loadFamily(token, id)
+
                             } else {
                                 message =
                                     if (signup) {
                                         "Account created. Ab Login karo."
                                     } else {
-                                        "Login response mein user details nahi mili. Dobara login karo."
+                                        "Login response mein user details nahi mili."
                                     }
                             }
+
                         } else {
                             message = result.optString(
                                 "msg",
@@ -246,7 +401,7 @@ fun ParentAuthScreen() {
                                         "error_description",
                                         result.optString(
                                             "error",
-                                            "Request failed. Please try again."
+                                            "Request failed."
                                         )
                                     )
                                 )
@@ -254,16 +409,17 @@ fun ParentAuthScreen() {
                         }
                     }
                 }
+
             } catch (e: Exception) {
                 mainHandler.post {
                     loading = false
-                    message =
-                        "Connection error: ${e.message ?: "Unknown error"}"
+                    message = "Connection error: ${e.message}"
                 }
             }
         }
     }
 
+    // Create family
     fun createFamily() {
 
         val name = familyInput.trim()
@@ -325,33 +481,43 @@ fun ParentAuthScreen() {
                                         family.optString("name")
 
                                     familyInput = ""
+
                                     familyMessage =
                                         "Family successfully created!"
+
+                                    loadChildDevices(
+                                        accessToken,
+                                        familyId
+                                    )
+
                                 } else {
                                     familyMessage =
-                                        "Family save hui, lekin response empty hai. Refresh karke check karo."
+                                        "Family save hui, lekin response empty hai."
                                 }
+
                             } catch (_: Exception) {
                                 familyMessage =
-                                    "Family save hui, lekin response read nahi hua."
+                                    "Family response read nahi hua."
                             }
+
                         } else {
                             familyMessage =
                                 "Family create error: $responseText"
                         }
                     }
                 }
+
             } catch (e: Exception) {
                 mainHandler.post {
                     creatingFamily = false
                     familyMessage =
-                        "Connection error: ${e.message ?: "Unknown error"}"
+                        "Connection error: ${e.message}"
                 }
             }
         }
     }
 
-    // Generate pairing code using authenticated Supabase RPC
+    // Generate pairing code
     fun generatePairingCode() {
 
         if (familyId.isBlank() || accessToken.isBlank()) {
@@ -415,12 +581,15 @@ fun ParentAuthScreen() {
                                     "token"
                                 ).firstNotNullOfOrNull { key ->
                                     data.optString(key)
-                                        .takeIf { it.isNotBlank() && it != "null" }
+                                        .takeIf {
+                                            it.isNotBlank() &&
+                                            it != "null"
+                                        }
                                 }.orEmpty()
 
                                 if (code.isBlank()) {
                                     pairingMessage =
-                                        "RPC response mein code nahi mila: $responseText"
+                                        "RPC response mein code nahi mila."
                                 } else {
                                     pairingCode = code
 
@@ -428,19 +597,23 @@ fun ParentAuthScreen() {
                                         data.optString("expires_at")
 
                                     val expiry = try {
-                                        Instant.parse(expiryText).epochSecond
+                                        Instant.parse(
+                                            expiryText
+                                        ).epochSecond
                                     } catch (_: Exception) {
                                         try {
                                             OffsetDateTime.parse(
                                                 expiryText
                                             ).toInstant().epochSecond
                                         } catch (_: Exception) {
-                                            Instant.now().plusSeconds(300)
+                                            Instant.now()
+                                                .plusSeconds(300)
                                                 .epochSecond
                                         }
                                     }
 
                                     pairingExpiryEpoch = expiry
+
                                     pairingRemainingSeconds =
                                         (expiry - Instant.now().epochSecond)
                                             .coerceAtLeast(0L)
@@ -448,27 +621,32 @@ fun ParentAuthScreen() {
                                     pairingMessage =
                                         "Pairing code successfully generated."
                                 }
+
                             } catch (e: Exception) {
                                 pairingMessage =
                                     "Response read error: ${e.message}"
                             }
+
                         } else {
                             pairingMessage =
                                 "Pairing error: $responseText"
                         }
                     }
                 }
+
             } catch (e: Exception) {
                 mainHandler.post {
                     pairingLoading = false
                     pairingMessage =
-                        "Connection error: ${e.message ?: "Unknown error"}"
+                        "Connection error: ${e.message}"
                 }
             }
         }
     }
 
+    // Copy code
     fun copyPairingCode() {
+
         if (pairingCode.isBlank() ||
             pairingRemainingSeconds <= 0L
         ) return
@@ -488,9 +666,10 @@ fun ParentAuthScreen() {
         pairingMessage = "Code copied successfully!"
     }
 
+    // Logout
     fun logout() {
-        val token = accessToken
 
+        val token = accessToken
         loading = true
 
         executor.execute {
@@ -503,23 +682,30 @@ fun ParentAuthScreen() {
                     .build()
 
                 httpClient.newCall(request).execute().use {
-                    // Session is cleared locally below.
+                    // Clear local session below
                 }
+
             } catch (_: Exception) {
-                // Local logout is allowed even if offline.
+                // Local logout also works offline
             }
 
             mainHandler.post {
                 accessToken = ""
                 userId = ""
                 userEmail = ""
+
                 familyId = ""
                 familyName = ""
                 familyInput = ""
+
+                childDevices = emptyList()
+                childDevicesMessage = ""
+
                 pairingCode = ""
                 pairingExpiryEpoch = 0L
                 pairingRemainingSeconds = 0L
                 pairingMessage = ""
+
                 loggedIn = false
                 password = ""
                 message = "Logged out."
@@ -556,10 +742,7 @@ fun ParentAuthScreen() {
 
                 Spacer(Modifier.height(8.dp))
 
-                Text(
-                    "Welcome, $userEmail",
-                    style = MaterialTheme.typography.bodyMedium
-                )
+                Text("Welcome, $userEmail")
 
                 Spacer(Modifier.height(24.dp))
 
@@ -573,6 +756,7 @@ fun ParentAuthScreen() {
 
                 } else if (familyId.isNotBlank()) {
 
+                    // Family card
                     Card(
                         modifier = Modifier.fillMaxWidth()
                     ) {
@@ -597,13 +781,148 @@ fun ParentAuthScreen() {
 
                             Spacer(Modifier.height(16.dp))
 
-                            Text("Family successfully connected to Supabase.")
+                            Text(
+                                "Family successfully connected to Supabase."
+                            )
                         }
                     }
 
                     Spacer(Modifier.height(20.dp))
 
-                    // Pairing code card
+                    // Child Device Management
+                    Card(
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(20.dp)
+                        ) {
+                            Text(
+                                "Child Device Management",
+                                style = MaterialTheme.typography.titleLarge
+                            )
+
+                            Spacer(Modifier.height(8.dp))
+
+                            Text(
+                                "Your connected child devices",
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+
+                            Spacer(Modifier.height(16.dp))
+
+                            if (childDevicesLoading) {
+
+                                CircularProgressIndicator(
+                                    modifier = Modifier.align(
+                                        Alignment.CenterHorizontally
+                                    )
+                                )
+
+                                Spacer(Modifier.height(8.dp))
+
+                                Text("Loading child devices...")
+
+                            } else if (childDevices.isEmpty()) {
+
+                                Text(
+                                    childDevicesMessage.ifBlank {
+                                        "No child device found."
+                                    },
+                                    color = MaterialTheme.colorScheme.secondary
+                                )
+
+                            } else {
+
+                                Text(
+                                    "Total Devices: ${childDevices.size}",
+                                    style = MaterialTheme.typography.titleMedium
+                                )
+
+                                Spacer(Modifier.height(12.dp))
+
+                                childDevices.forEachIndexed { index, device ->
+
+                                    if (index > 0) {
+                                        HorizontalDivider()
+                                        Spacer(Modifier.height(12.dp))
+                                    }
+
+                                    Text(
+                                        device.name,
+                                        style = MaterialTheme.typography.titleMedium
+                                    )
+
+                                    Spacer(Modifier.height(6.dp))
+
+                                    val isOnline =
+                                        device.status.equals(
+                                            "online",
+                                            ignoreCase = true
+                                        )
+
+                                    Row(
+                                        verticalAlignment =
+                                            Alignment.CenterVertically
+                                    ) {
+                                        Text("Status: ")
+
+                                        Text(
+                                            if (isOnline) "Online" else "Offline",
+                                            color = if (isOnline) {
+                                                MaterialTheme.colorScheme.primary
+                                            } else {
+                                                MaterialTheme.colorScheme.error
+                                            }
+                                        )
+                                    }
+
+                                    Spacer(Modifier.height(6.dp))
+
+                                    Text(
+                                        "Device ID: ${device.id}",
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+
+                                    Spacer(Modifier.height(6.dp))
+
+                                    Text(
+                                        "Last Seen: ${device.lastSeen}",
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                }
+                            }
+
+                            if (childDevicesMessage.isNotBlank() &&
+                                childDevices.isNotEmpty()
+                            ) {
+                                Spacer(Modifier.height(8.dp))
+
+                                Text(
+                                    childDevicesMessage,
+                                    color = MaterialTheme.colorScheme.error
+                                )
+                            }
+
+                            Spacer(Modifier.height(16.dp))
+
+                            OutlinedButton(
+                                onClick = {
+                                    loadChildDevices(
+                                        accessToken,
+                                        familyId
+                                    )
+                                },
+                                enabled = !childDevicesLoading,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text("Refresh Child Devices")
+                            }
+                        }
+                    }
+
+                    Spacer(Modifier.height(20.dp))
+
+                    // Pairing card
                     Card(
                         modifier = Modifier.fillMaxWidth()
                     ) {
@@ -611,6 +930,7 @@ fun ParentAuthScreen() {
                             modifier = Modifier.padding(20.dp),
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
+
                             Text(
                                 "Child Device Pairing",
                                 style = MaterialTheme.typography.titleLarge
@@ -619,8 +939,7 @@ fun ParentAuthScreen() {
                             Spacer(Modifier.height(8.dp))
 
                             Text(
-                                "Generate a temporary code to connect an authorized child device.",
-                                style = MaterialTheme.typography.bodyMedium
+                                "Generate a temporary code to connect an authorized child device."
                             )
 
                             Spacer(Modifier.height(16.dp))
@@ -640,10 +959,8 @@ fun ParentAuthScreen() {
                             Spacer(Modifier.height(16.dp))
 
                             if (pairingCode.isNotBlank()) {
-                                Text(
-                                    "YOUR PAIRING CODE",
-                                    style = MaterialTheme.typography.labelLarge
-                                )
+
+                                Text("YOUR PAIRING CODE")
 
                                 Spacer(Modifier.height(8.dp))
 
@@ -655,6 +972,7 @@ fun ParentAuthScreen() {
                                 Spacer(Modifier.height(8.dp))
 
                                 if (pairingRemainingSeconds > 0L) {
+
                                     val minutes =
                                         pairingRemainingSeconds / 60
 
@@ -679,6 +997,7 @@ fun ParentAuthScreen() {
                                     ) {
                                         Text("Copy Pairing Code")
                                     }
+
                                 } else {
                                     Text(
                                         "Code expired. Generate a new code.",
@@ -730,12 +1049,14 @@ fun ParentAuthScreen() {
 
                 } else {
 
+                    // Create Family
                     Card(
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Column(
                             modifier = Modifier.padding(20.dp)
                         ) {
+
                             Text(
                                 "Create Your Family",
                                 style = MaterialTheme.typography.titleLarge
@@ -744,7 +1065,7 @@ fun ParentAuthScreen() {
                             Spacer(Modifier.height(8.dp))
 
                             Text(
-                                "Apni family ka naam set karo. Iske baad child device pairing add karenge."
+                                "Apni family ka naam set karo."
                             )
 
                             Spacer(Modifier.height(16.dp))
@@ -764,15 +1085,18 @@ fun ParentAuthScreen() {
                             Spacer(Modifier.height(16.dp))
 
                             Button(
-                                onClick = { createFamily() },
+                                onClick = {
+                                    createFamily()
+                                },
                                 enabled = !creatingFamily,
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 Text(
-                                    if (creatingFamily)
+                                    if (creatingFamily) {
                                         "Creating..."
-                                    else
+                                    } else {
                                         "Create Family"
+                                    }
                                 )
                             }
                         }
@@ -784,7 +1108,7 @@ fun ParentAuthScreen() {
 
                     Text(
                         familyMessage,
-                        color = MaterialTheme.colorScheme.primary
+                        color = MaterialTheme.colorScheme.error
                     )
                 }
 
@@ -804,8 +1128,11 @@ fun ParentAuthScreen() {
                 Spacer(Modifier.height(28.dp))
 
                 OutlinedButton(
-                    onClick = { logout() },
-                    enabled = !loading && !creatingFamily &&
+                    onClick = {
+                        logout()
+                    },
+                    enabled = !loading &&
+                        !creatingFamily &&
                         !pairingLoading,
                     modifier = Modifier.fillMaxWidth()
                 ) {
@@ -815,6 +1142,7 @@ fun ParentAuthScreen() {
 
         } else {
 
+            // Login / Signup screen
             Column(
                 modifier = Modifier
                     .fillMaxSize()
@@ -847,8 +1175,12 @@ fun ParentAuthScreen() {
 
                 OutlinedTextField(
                     value = email,
-                    onValueChange = { email = it },
-                    label = { Text("Email Address") },
+                    onValueChange = {
+                        email = it
+                    },
+                    label = {
+                        Text("Email Address")
+                    },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -857,7 +1189,9 @@ fun ParentAuthScreen() {
 
                 OutlinedTextField(
                     value = password,
-                    onValueChange = { password = it },
+                    onValueChange = {
+                        password = it
+                    },
                     label = {
                         Text("Password (minimum 8 characters)")
                     },
@@ -870,7 +1204,9 @@ fun ParentAuthScreen() {
                 Spacer(Modifier.height(20.dp))
 
                 Button(
-                    onClick = { authenticate(isSignup) },
+                    onClick = {
+                        authenticate(isSignup)
+                    },
                     enabled = !loading,
                     modifier = Modifier.fillMaxWidth()
                 ) {
@@ -889,10 +1225,11 @@ fun ParentAuthScreen() {
                     enabled = !loading
                 ) {
                     Text(
-                        if (isSignup)
+                        if (isSignup) {
                             "Already have an account? Login"
-                        else
+                        } else {
                             "New user? Create Account"
+                        }
                     )
                 }
 
@@ -905,8 +1242,8 @@ fun ParentAuthScreen() {
                     Spacer(Modifier.height(16.dp))
 
                     Text(
-                        text = message,
-                        color = MaterialTheme.colorScheme.primary
+                        message,
+                        color = MaterialTheme.colorScheme.error
                     )
                 }
 
