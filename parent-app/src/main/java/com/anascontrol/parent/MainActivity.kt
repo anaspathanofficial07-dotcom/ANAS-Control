@@ -1,6 +1,9 @@
 
 package com.anascontrol.parent
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -13,14 +16,19 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.delay
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.time.Instant
+import java.time.OffsetDateTime
 import java.util.concurrent.Executors
 
 private const val SUPABASE_URL =
@@ -47,6 +55,8 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun ParentAuthScreen() {
 
+    val context = LocalContext.current
+
     var isSignup by remember { mutableStateOf(false) }
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
@@ -66,8 +76,34 @@ fun ParentAuthScreen() {
     var familyMessage by remember { mutableStateOf("") }
     var creatingFamily by remember { mutableStateOf(false) }
 
+    // Pairing code states
+    var pairingDeviceName by remember {
+        mutableStateOf("Parent Device")
+    }
+    var pairingCode by remember { mutableStateOf("") }
+    var pairingExpiryEpoch by remember { mutableLongStateOf(0L) }
+    var pairingRemainingSeconds by remember {
+        mutableLongStateOf(0L)
+    }
+    var pairingLoading by remember { mutableStateOf(false) }
+    var pairingMessage by remember { mutableStateOf("") }
+
     val mainHandler = remember {
         Handler(Looper.getMainLooper())
+    }
+
+    // Pairing countdown
+    LaunchedEffect(pairingExpiryEpoch) {
+        while (pairingExpiryEpoch > 0L) {
+            val remaining =
+                pairingExpiryEpoch - Instant.now().epochSecond
+
+            pairingRemainingSeconds = remaining.coerceAtLeast(0L)
+
+            if (remaining <= 0L) break
+
+            delay(1000)
+        }
     }
 
     fun loadFamily(token: String, parentId: String) {
@@ -315,6 +351,143 @@ fun ParentAuthScreen() {
         }
     }
 
+    // Generate pairing code using authenticated Supabase RPC
+    fun generatePairingCode() {
+
+        if (familyId.isBlank() || accessToken.isBlank()) {
+            pairingMessage = "Family aur login session check karo."
+            return
+        }
+
+        if (pairingDeviceName.isBlank()) {
+            pairingMessage = "Parent device ka naam dalo."
+            return
+        }
+
+        pairingLoading = true
+        pairingMessage = ""
+        pairingCode = ""
+        pairingExpiryEpoch = 0L
+
+        val json = JSONObject().apply {
+            put("p_device_name", pairingDeviceName.trim())
+        }
+
+        executor.execute {
+            try {
+                val body = json.toString().toRequestBody(
+                    "application/json; charset=utf-8".toMediaType()
+                )
+
+                val request = Request.Builder()
+                    .url(
+                        "$SUPABASE_URL/rest/v1/rpc/create_pairing_code"
+                    )
+                    .addHeader("apikey", SUPABASE_KEY)
+                    .addHeader("Authorization", "Bearer $accessToken")
+                    .addHeader("Content-Type", "application/json")
+                    .post(body)
+                    .build()
+
+                httpClient.newCall(request).execute().use { response ->
+
+                    val responseText =
+                        response.body?.string().orEmpty()
+
+                    mainHandler.post {
+                        pairingLoading = false
+
+                        if (response.isSuccessful) {
+                            try {
+                                val data = if (
+                                    responseText.trim().startsWith("[")
+                                ) {
+                                    JSONArray(responseText)
+                                        .optJSONObject(0) ?: JSONObject()
+                                } else {
+                                    JSONObject(responseText)
+                                }
+
+                                val code = listOf(
+                                    "code",
+                                    "pairing_code",
+                                    "raw_code",
+                                    "token"
+                                ).firstNotNullOfOrNull { key ->
+                                    data.optString(key)
+                                        .takeIf { it.isNotBlank() && it != "null" }
+                                }.orEmpty()
+
+                                if (code.isBlank()) {
+                                    pairingMessage =
+                                        "RPC response mein code nahi mila: $responseText"
+                                } else {
+                                    pairingCode = code
+
+                                    val expiryText =
+                                        data.optString("expires_at")
+
+                                    val expiry = try {
+                                        Instant.parse(expiryText).epochSecond
+                                    } catch (_: Exception) {
+                                        try {
+                                            OffsetDateTime.parse(
+                                                expiryText
+                                            ).toInstant().epochSecond
+                                        } catch (_: Exception) {
+                                            Instant.now().plusSeconds(300)
+                                                .epochSecond
+                                        }
+                                    }
+
+                                    pairingExpiryEpoch = expiry
+                                    pairingRemainingSeconds =
+                                        (expiry - Instant.now().epochSecond)
+                                            .coerceAtLeast(0L)
+
+                                    pairingMessage =
+                                        "Pairing code successfully generated."
+                                }
+                            } catch (e: Exception) {
+                                pairingMessage =
+                                    "Response read error: ${e.message}"
+                            }
+                        } else {
+                            pairingMessage =
+                                "Pairing error: $responseText"
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                mainHandler.post {
+                    pairingLoading = false
+                    pairingMessage =
+                        "Connection error: ${e.message ?: "Unknown error"}"
+                }
+            }
+        }
+    }
+
+    fun copyPairingCode() {
+        if (pairingCode.isBlank() ||
+            pairingRemainingSeconds <= 0L
+        ) return
+
+        val clipboard =
+            context.getSystemService(
+                Context.CLIPBOARD_SERVICE
+            ) as ClipboardManager
+
+        clipboard.setPrimaryClip(
+            ClipData.newPlainText(
+                "ANAS CONTROL Pairing Code",
+                pairingCode
+            )
+        )
+
+        pairingMessage = "Code copied successfully!"
+    }
+
     fun logout() {
         val token = accessToken
 
@@ -343,6 +516,10 @@ fun ParentAuthScreen() {
                 familyId = ""
                 familyName = ""
                 familyInput = ""
+                pairingCode = ""
+                pairingExpiryEpoch = 0L
+                pairingRemainingSeconds = 0L
+                pairingMessage = ""
                 loggedIn = false
                 password = ""
                 message = "Logged out."
@@ -426,10 +603,130 @@ fun ParentAuthScreen() {
 
                     Spacer(Modifier.height(20.dp))
 
-                    Text(
-                        "Next phase: Child Device Pairing",
-                        style = MaterialTheme.typography.titleMedium
-                    )
+                    // Pairing code card
+                    Card(
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(20.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(
+                                "Child Device Pairing",
+                                style = MaterialTheme.typography.titleLarge
+                            )
+
+                            Spacer(Modifier.height(8.dp))
+
+                            Text(
+                                "Generate a temporary code to connect an authorized child device.",
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+
+                            Spacer(Modifier.height(16.dp))
+
+                            OutlinedTextField(
+                                value = pairingDeviceName,
+                                onValueChange = {
+                                    pairingDeviceName = it
+                                },
+                                label = {
+                                    Text("Parent Device Name")
+                                },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+
+                            Spacer(Modifier.height(16.dp))
+
+                            if (pairingCode.isNotBlank()) {
+                                Text(
+                                    "YOUR PAIRING CODE",
+                                    style = MaterialTheme.typography.labelLarge
+                                )
+
+                                Spacer(Modifier.height(8.dp))
+
+                                Text(
+                                    pairingCode,
+                                    style = MaterialTheme.typography.headlineMedium
+                                )
+
+                                Spacer(Modifier.height(8.dp))
+
+                                if (pairingRemainingSeconds > 0L) {
+                                    val minutes =
+                                        pairingRemainingSeconds / 60
+
+                                    val seconds =
+                                        pairingRemainingSeconds % 60
+
+                                    Text(
+                                        "Expires in %02d:%02d".format(
+                                            minutes,
+                                            seconds
+                                        ),
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+
+                                    Spacer(Modifier.height(12.dp))
+
+                                    OutlinedButton(
+                                        onClick = {
+                                            copyPairingCode()
+                                        },
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Text("Copy Pairing Code")
+                                    }
+                                } else {
+                                    Text(
+                                        "Code expired. Generate a new code.",
+                                        color = MaterialTheme.colorScheme.error
+                                    )
+                                }
+
+                                Spacer(Modifier.height(12.dp))
+                            }
+
+                            Button(
+                                onClick = {
+                                    generatePairingCode()
+                                },
+                                enabled = !pairingLoading &&
+                                    pairingRemainingSeconds <= 0L,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(
+                                    if (pairingLoading) {
+                                        "Generating..."
+                                    } else if (pairingCode.isNotBlank()) {
+                                        "Generate New Code"
+                                    } else {
+                                        "Generate Pairing Code"
+                                    }
+                                )
+                            }
+
+                            if (pairingMessage.isNotBlank()) {
+                                Spacer(Modifier.height(12.dp))
+
+                                Text(
+                                    pairingMessage,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+
+                            Spacer(Modifier.height(8.dp))
+
+                            Text(
+                                "Share this code only with the child device you are authorized to manage. It expires after 5 minutes.",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                    }
+
+                    Spacer(Modifier.height(20.dp))
 
                 } else {
 
@@ -508,7 +805,8 @@ fun ParentAuthScreen() {
 
                 OutlinedButton(
                     onClick = { logout() },
-                    enabled = !loading && !creatingFamily,
+                    enabled = !loading && !creatingFamily &&
+                        !pairingLoading,
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text("Logout")
