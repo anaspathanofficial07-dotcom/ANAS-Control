@@ -27,7 +27,7 @@ private const val SUPABASE_URL =
 // Apni Supabase Publishable Key yahan paste karo.
 // Secret / Service Role Key kabhi mat lagana.
 private const val SUPABASE_KEY =
-    "PASTE_YOUR_PUBLISHABLE_KEY_HERE"
+    "sb_publishable_mu0PfBf_CR2eStZvhQm4ng_5sOgrttC"
 
 private val httpClient = OkHttpClient()
 private val executor = Executors.newSingleThreadExecutor()
