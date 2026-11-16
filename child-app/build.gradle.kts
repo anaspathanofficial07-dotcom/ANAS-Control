@@ -40,8 +40,8 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
 
-    // HTTP client for Supabase Edge Function
-    implementation("com.squareup.okhttp3:okhttp:4.12.1")
+    // OkHttp networking library
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
